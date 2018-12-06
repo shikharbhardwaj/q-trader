@@ -5,56 +5,80 @@ from keras.layers import Dense
 from keras.optimizers import Adam
 
 import numpy as np
-import random
+
 from collections import deque
 
 class Agent:
-	def __init__(self, state_size, is_eval=False, model_name=""):
-		self.state_size = state_size # normalized previous days
-		self.action_size = 3 # sit, buy, sell
-		self.memory = deque(maxlen=1000)
-		self.inventory = []
-		self.model_name = model_name
-		self.is_eval = is_eval
+        def __init__(self, state_size, is_eval=False, model_name=""):
+                self.state_size = state_size # normalized previous days
+                self.action_size = 3 # sit, buy, sell
+                self.memory = deque(maxlen=480)
+                self.inventory = []
+                self.model_name = model_name
+                self.is_eval = is_eval
 
-		self.gamma = 0.95
-		self.epsilon = 1.0
-		self.epsilon_min = 0.01
-		self.epsilon_decay = 0.995
+                self.gamma = 0.99
+                self.epsilon = 1.0
+                self.epsilon_min = 0.01
+                self.epsilon_decay = 0.995
+                self.tau = 0.001
+                self.learning_rate = 0.0025
 
-		self.model = load_model("models/" + model_name) if is_eval else self._model()
+                self.model = load_model("models/" + model_name) if is_eval else self._model()
+                self.target_model = self._model()
 
-	def _model(self):
-		model = Sequential()
-		model.add(Dense(units=64, input_dim=self.state_size, activation="relu"))
-		model.add(Dense(units=32, activation="relu"))
-		model.add(Dense(units=8, activation="relu"))
-		model.add(Dense(self.action_size, activation="linear"))
-		model.compile(loss="mse", optimizer=Adam(lr=0.001))
+        def _model(self):
+                model = Sequential()
+                model.add(Dense(units=64, input_dim=self.state_size, activation="relu"))
+                model.add(Dense(units=32, activation="relu"))
+                model.add(Dense(units=8, activation="relu"))
+                model.add(Dense(self.action_size, activation="linear"))
+                model.compile(loss="mse", optimizer=Adam(lr=0.001))
 
-		return model
+                return model
 
-	def act(self, state):
-		if not self.is_eval and np.random.rand() <= self.epsilon:
-			return random.randrange(self.action_size)
+        def act(self, state):
+                if not self.is_eval and np.random.rand() <= self.epsilon:
+                        return np.random.randint(self.action_size)
 
-		options = self.model.predict(state)
-		return np.argmax(options[0])
+                state = np.reshape(state, (1, 8))
+                options = self.model.predict(state)[0]
+                return np.argmax(options)
 
-	def expReplay(self, batch_size):
-		mini_batch = []
-		l = len(self.memory)
-		for i in xrange(l - batch_size + 1, l):
-			mini_batch.append(self.memory[i])
+        def sampleMemory(self, batch_size):
+            idx = np.random.permutation(len(self.memory))[:batch_size]
+            cols = [[], [], [], [], []] # state, action, reward, next_state, done 
+            for i in idx:
+                memory = self.memory[i]
+                for col, value in zip(cols, memory):
+                    col.append(value)
 
-		for state, action, reward, next_state, done in mini_batch:
-			target = reward
-			if not done:
-				target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
+            cols = [np.array(col) for col in cols]
+            return (cols[0], cols[1], cols[2], cols[3], cols[4])
 
-			target_f = self.model.predict(state)
-			target_f[0][action] = target
-			self.model.fit(state, target_f, epochs=1, verbose=0)
 
-		if self.epsilon > self.epsilon_min:
-			self.epsilon *= self.epsilon_decay 
+        def expReplay(self, batch_size):
+                states, actions, rewards, next_states, dones = self.sampleMemory(batch_size)
+                # Predict actions from the online model
+                action_values = self.model.predict(next_states)
+                actions = np.argmax(action_values, axis=1)
+
+                # Get Q Values from the target network
+                target_q = self.target_model.predict(next_states)
+                target_q[np.arange(batch_size), actions].dot(self.gamma)
+                target_q[np.arange(batch_size), actions] += rewards
+                # Fit the model
+                self.model.fit(states, target_q, epochs=1, verbose=0)
+
+                if self.epsilon > self.epsilon_min:
+                    self.epsilon *= self.epsilon_decay 
+
+        def target_train(self):
+            weights = self.model.get_weights()
+            target_weights = self.target_model.get_weights()
+
+            for i in range(len(target_weights)):
+                target_weights[i] = weights[i] * self.tau + target_weights[i] * (1 - self.tau)
+
+            self.target_model.set_weights(target_weights)
+
